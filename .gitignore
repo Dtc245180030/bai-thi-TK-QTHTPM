@@ -1,0 +1,11 @@
+# Environment variables
+.env
+
+# Logs and temporary files
+*.log
+.system_generated/
+scratch/
+
+# OS specific files
+.DS_Store
+Thumbs.db

@@ -1,0 +1,281 @@
+version: '3.7'
+
+services:
+  # ============================================================================
+  # CỤM 1: ỨNG DỤNG CHÍNH & CƠ SỞ DỮ LIỆU (TIÊU CHÍ 1, 2, 3)
+  # ============================================================================
+
+  # 1. Cơ sở dữ liệu MySQL 8.0 (Hardening: Cô lập hoàn toàn trong backend-net, KHÔNG bind port ra ngoài)
+  db:
+    image: mysql:8.0
+    container_name: portfolio_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_secure_pass_2026}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-portfolio_db}
+      MYSQL_USER: ${MYSQL_USER:-portfolio_user}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-portfolio_secure_pass_2026}
+    command:
+      - '--character-set-server=utf8mb4'
+      - '--collation-server=utf8mb4_unicode_ci'
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend-net
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u $$MYSQL_USER -p$$MYSQL_PASSWORD || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # 2. Ứng dụng Web PHP (Apache + PDO MySQL thuần)
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: portfolio_web
+    restart: unless-stopped
+    environment:
+      DB_HOST: ${DB_HOST:-db}
+      DB_PORT: ${DB_PORT:-3306}
+      DB_NAME: ${DB_NAME:-portfolio_db}
+      DB_USER: ${DB_USER:-portfolio_user}
+      DB_PASSWORD: ${DB_PASSWORD:-portfolio_secure_pass_2026}
+    volumes:
+      - ./src:/var/www/html
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - db
+    networks:
+      - frontend-net
+      - backend-net
+
+  # 3. Giao diện quản trị cơ sở dữ liệu phpMyAdmin
+  phpmyadmin:
+    image: phpmyadmin:latest
+    container_name: portfolio_phpmyadmin
+    restart: unless-stopped
+    environment:
+      PMA_HOST: ${DB_HOST:-db}
+      PMA_PORT: ${DB_PORT:-3306}
+      PMA_ABSOLUTE_URI: ${PMA_ABSOLUTE_URI:-/pma/}
+      UPLOAD_LIMIT: 64M
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - db
+    networks:
+      - frontend-net
+      - backend-net
+
+  # 4. Nginx Reverse Proxy (Cổng tiếp nhận duy nhất, kết nối frontend và chuyển tiếp)
+  nginx:
+    image: nginx:alpine
+    container_name: portfolio_nginx
+    restart: unless-stopped
+    ports:
+      - "${NGINX_PORT:-80}:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - nginx_logs:/var/log/nginx
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - web
+      - phpmyadmin
+    networks:
+      - frontend-net
+      - backend-net
+
+  # ============================================================================
+  # CỤM 2: HỆ THỐNG THU THẬP METRICS (EXPORTERS - TIÊU CHÍ 4)
+  # ============================================================================
+
+  # 5. cAdvisor - Giám sát tài nguyên container (CPU, RAM, Disk, Network)
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:latest
+    container_name: portfolio_cadvisor
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg
+    networks:
+      - backend-net
+
+  # 6. Node Exporter - Giám sát máy chủ (Non-root user: nobody)
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: portfolio_node_exporter
+    restart: unless-stopped
+    user: "65534:65534"
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)'
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend-net
+
+  # 7. Nginx Prometheus Exporter - Thu thập số liệu traffic từ Nginx stub_status
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:latest
+    container_name: portfolio_nginx_exporter
+    restart: unless-stopped
+    user: "1000:1000"
+    command:
+      - -nginx.scrape-uri=http://nginx:80/stub_status
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - nginx
+    networks:
+      - backend-net
+
+  # 8. MySQL Server Exporter - Thu thập số liệu hiệu năng CSDL MySQL
+  mysql-exporter:
+    image: prom/mysqld-exporter:latest
+    container_name: portfolio_mysql_exporter
+    restart: unless-stopped
+    user: "1000:1000"
+    command:
+      - "--mysqld.address=db:3306"
+      - "--mysqld.username=portfolio_user:portfolio_secure_pass_2026"
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - db
+    networks:
+      - backend-net
+
+  # ============================================================================
+  # CỤM 3: GIÁM SÁT PROMETHEUS & GRAFANA (TIÊU CHÍ 4)
+  # ============================================================================
+
+  # 9. Prometheus Time-Series Database (Non-root user: nobody)
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: portfolio_prometheus
+    restart: unless-stopped
+    user: "65534:65534"
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - cadvisor
+      - node-exporter
+      - nginx-exporter
+    networks:
+      - backend-net
+
+  # 10. Grafana Analytics & Dashboards
+  grafana:
+    image: grafana/grafana:latest
+    container_name: portfolio_grafana
+    restart: unless-stopped
+    user: "472:472"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin123}
+      GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s:%(http_port)s/grafana/"
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "${GRAFANA_PORT:-3001}:3000"
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - prometheus
+    networks:
+      - frontend-net
+      - backend-net
+
+  # ============================================================================
+  # CỤM 4: HỆ THỐNG LOG TẬP TRUNG LOKI + PROMTAIL (TIÊU CHÍ 5)
+  # ============================================================================
+
+  # 11. Loki - Lưu trữ & Lập chỉ mục Log tập trung
+  loki:
+    image: grafana/loki:latest
+    container_name: portfolio_loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - backend-net
+
+  # 12. Promtail - Thu thập Log từ Nginx & Docker Containers đẩy về Loki
+  promtail:
+    image: grafana/promtail:latest
+    container_name: portfolio_promtail
+    restart: unless-stopped
+    command: -config.file=/etc/promtail/config.yml
+    volumes:
+      - ./promtail/promtail-config.yaml:/etc/promtail/config.yml:ro
+      - nginx_logs:/var/log/nginx:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      - loki
+    networks:
+      - backend-net
+
+# ==============================================================================
+# PHÂN TÁCH MẠNG CÔ LẬP (NETWORK ISOLATION - TIÊU CHÍ 6)
+# ==============================================================================
+networks:
+  # Mạng ngoài: Chỉ Nginx và các Web App tiếp nhận request
+  frontend-net:
+    driver: bridge
+  # Mạng trong cô lập: DB, Exporters, Prometheus, Loki, Promtail hoàn toàn ẩn khỏi Internet
+  backend-net:
+    driver: bridge
+
+# ==============================================================================
+# VOLUMES LƯU TRỮ DỮ LIỆU BỀN VỮNG
+# ==============================================================================
+volumes:
+  db_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local
+  nginx_logs:
+    driver: local

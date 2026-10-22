@@ -1,0 +1,2 @@
+# Bắt buộc Apache trả về charset UTF-8 cho tất cả các trang
+AddDefaultCharset UTF-8
