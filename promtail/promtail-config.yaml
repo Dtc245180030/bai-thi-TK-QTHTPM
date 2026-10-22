@@ -1,0 +1,54 @@
+# ==============================================================================
+# PROMTAIL CONFIGURATION
+# Tiêu chí 5: Thu thập Log từ Nginx và Docker Containers đẩy về Loki
+# ==============================================================================
+
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+  log_level: info
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+    batchwait: 1s
+    batchsize: 1048576 # 1MB
+
+scrape_configs:
+  # ----------------------------------------------------------------------------
+  # 1. Thu thập Nginx Logs (access.log và error.log)
+  # ----------------------------------------------------------------------------
+  - job_name: nginx
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx
+          env: production
+          service: portfolio_nginx
+          __path__: /var/log/nginx/*.log
+
+  # ----------------------------------------------------------------------------
+  # 2. Thu thập Docker Container Logs
+  # ----------------------------------------------------------------------------
+  - job_name: docker
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: docker
+          env: production
+          __path__: /var/lib/docker/containers/*/*-json.log
+    pipeline_stages:
+      - json:
+          expressions:
+            log: log
+            stream: stream
+            time: time
+      - timestamp:
+          source: time
+          format: RFC3339Nano
+      - output:
+          source: log
