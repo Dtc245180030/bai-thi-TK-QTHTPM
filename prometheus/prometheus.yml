@@ -1,0 +1,51 @@
+# ==============================================================================
+# PROMETHEUS CONFIGURATION
+# Giám sát Container (cAdvisor), Máy chủ (node-exporter), Web (Nginx), Database (MySQL)
+# Chu kỳ cào dữ liệu (scrape): 10 giây (theo yêu cầu 5s - 15s)
+# ==============================================================================
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+  scrape_timeout: 5s
+
+scrape_configs:
+  # 1. Giám sát chính Prometheus
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+          group: 'monitoring'
+
+  # 2. Giám sát tài nguyên Containers (CPU, RAM, Network I/O) qua cAdvisor
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          service: 'cadvisor'
+          group: 'containers'
+
+  # 3. Giám sát phần cứng và hệ điều hành máy chủ qua Node Exporter
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          service: 'node-exporter'
+          group: 'host'
+
+  # 4. Giám sát lưu lượng Web Server Nginx qua Nginx Prometheus Exporter
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+        labels:
+          service: 'nginx'
+          group: 'web'
+
+  # 5. Giám sát Cơ sở dữ liệu MySQL qua MySQL Server Exporter
+  - job_name: 'mysql'
+    static_configs:
+      - targets: ['mysql-exporter:9104']
+        labels:
+          service: 'mysql'
+          group: 'database'
